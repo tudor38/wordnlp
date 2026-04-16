@@ -61,40 +61,26 @@ def _extract_definitions(paragraphs: tuple[str, ...]) -> pd.DataFrame:
 
 
 @st.cache_data(show_spinner=False, max_entries=5)
-def _extract_all_entities(
+def _extract_entities(
     paragraphs: tuple[str, ...],
+    labels: tuple[str, ...],
     model_name: str = "en_core_web_sm",
 ) -> pd.DataFrame:
-    """Run spaCy NER once over every paragraph and return all entity rows.
-
-    Downstream views filter by label. Running NER once via nlp.pipe avoids
-    the previous 3x pass over the same paragraphs (dates, parties, numbers).
-    """
     nlp = get_spacy_nlp(model_name)
     rows = []
-    for idx, doc in enumerate(nlp.pipe(paragraphs)):
-        para = paragraphs[idx]
+    for idx, para in enumerate(paragraphs):
+        doc = nlp(para)
         for ent in doc.ents:
-            rows.append(
-                {
-                    "Para": idx,
-                    "Value": ent.text,
-                    "Type": ent.label_,
-                    "Context": para,
-                }
-            )
+            if ent.label_ in labels:
+                rows.append(
+                    {
+                        "Para": idx,
+                        "Value": ent.text,
+                        "Type": ent.label_,
+                        "Context": para,
+                    }
+                )
     return pd.DataFrame(rows)
-
-
-_DATE_LABELS = ("DATE",)
-_PARTY_LABELS = ("LAW", "PERSON", "ORG", "GPE", "LOC", "PRODUCT")
-_NUMBER_LABELS = ("QUANTITY", "CARDINAL")
-
-
-def _filter_by_type(entities_df: pd.DataFrame, labels: tuple[str, ...]) -> pd.DataFrame:
-    if entities_df.empty:
-        return entities_df
-    return entities_df[entities_df["Type"].isin(labels)].reset_index(drop=True)
 
 
 _MONEY_RE = re.compile(
@@ -147,14 +133,12 @@ _SECTION_REF = re.compile(
 )
 
 
-def _drop_section_refs(amounts_df: pd.DataFrame) -> pd.DataFrame:
-    """Drop rows whose Value is a section reference (e.g. '4.3.1') rather than a real amount."""
+def _clean_amounts(amounts_df: pd.DataFrame) -> pd.DataFrame:
     mask = ~amounts_df["Value"].apply(lambda v: bool(_SECTION_REF.search(v)))
     return amounts_df[mask].reset_index(drop=True)
 
 
-def _drop_false_dates(dates_df: pd.DataFrame) -> pd.DataFrame:
-    """Drop rows whose Value is a section/duration spuriously tagged as DATE by spaCy."""
+def _clean_dates(dates_df: pd.DataFrame) -> pd.DataFrame:
     mask = ~dates_df["Value"].str.strip().apply(
         lambda v: bool(_FALSE_DATE_PATTERNS.match(v))
     )
@@ -254,18 +238,21 @@ if st.session_state.get(KEY_DT_CACHE_KEY) != _cache_key:
     try:
         with st.spinner("Extracting document terms…"):
             defs_df = _extract_definitions(paragraphs)
-            all_entities_df = _extract_all_entities(paragraphs, spacy_model)
-            dates_df = _drop_false_dates(
-                _filter_by_type(all_entities_df, _DATE_LABELS).drop(
+            dates_df = _clean_dates(
+                _extract_entities(paragraphs, ("DATE",), spacy_model).drop(
                     columns="Type", errors="ignore"
                 )
             )
-            parties_df = _filter_by_type(all_entities_df, _PARTY_LABELS)
+            parties_df = _extract_entities(
+                paragraphs,
+                ("LAW", "PERSON", "ORG", "GPE", "LOC", "PRODUCT"),
+                spacy_model,
+            )
             money_df = _extract_money(paragraphs)
-            numbers_df = _drop_section_refs(
-                _filter_by_type(all_entities_df, _NUMBER_LABELS).drop(
-                    columns="Type", errors="ignore"
-                )
+            numbers_df = _clean_amounts(
+                _extract_entities(
+                    paragraphs, ("QUANTITY", "CARDINAL"), spacy_model
+                ).drop(columns="Type", errors="ignore")
             )
     except RuntimeError as e:
         st.error(str(e))

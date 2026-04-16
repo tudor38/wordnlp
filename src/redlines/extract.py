@@ -30,10 +30,6 @@ from typing import Literal, Optional
 from src.shared import (
     W,
     _tag,
-    MOVE_FROM_TAG,
-    MOVE_TO_TAG,
-    P_TAG,
-    T_TAG,
     Span,
     SentenceSpan,
     WordVersion,
@@ -43,13 +39,6 @@ from src.shared import (
     _build_parent_map,
     _in_move_from,
 )
-
-_INS_TAG = _tag(W, "ins")
-_DEL_TAG = _tag(W, "del")
-_DEL_TEXT_TAG = _tag(W, "delText")
-_ID_ATTR = _tag(W, "id")
-_AUTHOR_ATTR = _tag(W, "author")
-_DATE_ATTR = _tag(W, "date")
 
 
 # ---------------------------------------------------------------------------
@@ -146,7 +135,7 @@ def _nearest_move_ancestor(elem: ET.Element, parent_map: dict) -> Optional[ET.El
     current = elem
     while current in parent_map:
         current = parent_map[current]
-        if current.tag == MOVE_FROM_TAG or current.tag == MOVE_TO_TAG:
+        if current.tag in (_tag(W, "moveFrom"), _tag(W, "moveTo")):
             return current
     return None
 
@@ -154,21 +143,23 @@ def _nearest_move_ancestor(elem: ET.Element, parent_map: dict) -> Optional[ET.El
 # ---------------------------------------------------------------------------
 # Core parsers
 # ---------------------------------------------------------------------------
-def _parse_redlines_from_root(
-    root: ET.Element, parent_map: dict[ET.Element, ET.Element]
-) -> list[Redline]:
+def _parse_redlines(xml_bytes: bytes) -> list[Redline]:
     """
-    Extract all tracked insertions and deletions from a parsed document root.
+    Extract all tracked insertions and deletions from document.xml.
 
     Only non-moveFrom paragraphs are enumerated so that para_idx values
     align with DocumentParagraphs.paragraphs indices.
     """
+    root = ET.fromstring(xml_bytes)
+    parent_map = _build_parent_map(root)
+
     redlines: list[Redline] = []
     para_texts: list[str] = []
     change_spans: dict[str, dict] = {}
 
+    # Enumerate only final-document paragraphs (skip moveFrom)
     para_idx = 0
-    for para in root.iter(P_TAG):
+    for para in root.iter(_tag(W, "p")):
         if _in_move_from(para, parent_map):
             continue
 
@@ -178,15 +169,18 @@ def _parse_redlines_from_root(
         for elem in para.iter():
             tag = elem.tag
 
-            if tag == _INS_TAG or tag == _DEL_TAG:
-                rid = elem.get(_ID_ATTR)
+            if tag in (_tag(W, "ins"), _tag(W, "del")):
+                rid = elem.get(_tag(W, "id"))
+                author = elem.get(_tag(W, "author"), "")
+                date = elem.get(_tag(W, "date"), "")
+                kind: Literal["insertion", "deletion"] = (
+                    "insertion" if tag == _tag(W, "ins") else "deletion"
+                )
+                text_tag = _tag(W, "t") if kind == "insertion" else _tag(W, "delText")
+                text = "".join(t.text or "" for t in elem.iter(text_tag))
+
                 if rid is None:
                     continue
-                kind: Literal["insertion", "deletion"] = (
-                    "insertion" if tag == _INS_TAG else "deletion"
-                )
-                text_tag = T_TAG if kind == "insertion" else _DEL_TEXT_TAG
-                text = "".join(t.text or "" for t in elem.iter(text_tag))
 
                 change_spans[rid] = {
                     "start": char_pos,
@@ -196,8 +190,8 @@ def _parse_redlines_from_root(
                 redlines.append(
                     Redline(
                         id=rid,
-                        author=elem.get(_AUTHOR_ATTR, ""),
-                        date=elem.get(_DATE_ATTR, ""),
+                        author=author,
+                        date=date,
                         kind=kind,
                         text=text,
                         char_start=char_pos,
@@ -205,7 +199,12 @@ def _parse_redlines_from_root(
                     )
                 )
 
-            elif tag == T_TAG or tag == _DEL_TEXT_TAG:
+            elif tag == _tag(W, "t"):
+                t = elem.text or ""
+                char_pos += len(t)
+                para_text_parts.append(t)
+
+            elif tag == _tag(W, "delText"):
                 t = elem.text or ""
                 char_pos += len(t)
                 para_text_parts.append(t)
@@ -227,18 +226,9 @@ def _parse_redlines_from_root(
     return redlines
 
 
-def _parse_redlines(xml_bytes: bytes) -> list[Redline]:
-    """Parse redlines from raw document.xml bytes (thin wrapper for tests/CLI)."""
-    root = ET.fromstring(xml_bytes)
-    parent_map = _build_parent_map(root)
-    return _parse_redlines_from_root(root, parent_map)
-
-
-def _parse_moves_from_root(
-    root: ET.Element, parent_map: dict[ET.Element, ET.Element]
-) -> list[Move]:
+def _parse_moves(xml_bytes: bytes) -> list[Move]:
     """
-    Extract validated paragraph moves from a parsed document root.
+    Extract validated paragraph moves from document.xml.
 
     A move pair is only kept if:
       1. Both <w:moveFrom> and <w:moveTo> exist for the same w:id
@@ -258,38 +248,49 @@ def _parse_moves_from_root(
       from_para_idx : xml_order_idx (counts all <w:p> including moveFrom)
       to_para_idx   : index in final document paragraphs (moveFrom excluded)
     """
+    root = ET.fromstring(xml_bytes)
+    parent_map = _build_parent_map(root)
+
     move_info: dict[str, dict] = {}
 
     final_idx = 0
     xml_idx = 0
 
-    for para in root.iter(P_TAG):
+    for para in root.iter(_tag(W, "p")):
         anc = _nearest_move_ancestor(para, parent_map)
 
-        if anc is not None and anc.tag == MOVE_FROM_TAG:
-            move_id = anc.get(_ID_ATTR)
+        if anc is not None and anc.tag == _tag(W, "moveFrom"):
+            move_id = anc.get(_tag(W, "id"))
+            author = anc.get(_tag(W, "author"), "")
+            date = anc.get(_tag(W, "date"), "")
+
+            # Use all <w:t> for rendered text — this resolves nested edits
+            # so the comparison against moveTo text is apples-to-apples
+            text = "".join(t.text or "" for t in para.iter(_tag(W, "t")))
+
             if move_id:
-                # Use all <w:t> for rendered text — this resolves nested edits
-                # so the comparison against moveTo text is apples-to-apples
-                text = "".join(t.text or "" for t in para.iter(T_TAG))
                 move_info.setdefault(move_id, {}).update(
                     {
                         "from_xml_idx": xml_idx,
                         "from_text": text,
-                        "author": anc.get(_AUTHOR_ATTR, ""),
-                        "date": anc.get(_DATE_ATTR, ""),
+                        "from_para_text": text,
+                        "author": author,
+                        "date": date,
                     }
                 )
             xml_idx += 1
 
-        elif anc is not None and anc.tag == MOVE_TO_TAG:
-            move_id = anc.get(_ID_ATTR)
+        elif anc is not None and anc.tag == _tag(W, "moveTo"):
+            move_id = anc.get(_tag(W, "id"))
+
+            text = "".join(t.text or "" for t in para.iter(_tag(W, "t")))
+
             if move_id:
-                text = "".join(t.text or "" for t in para.iter(T_TAG))
                 move_info.setdefault(move_id, {}).update(
                     {
                         "to_final_idx": final_idx,
                         "to_text": text,
+                        "to_para_text": text,
                     }
                 )
             final_idx += 1
@@ -307,6 +308,8 @@ def _parse_moves_from_root(
             continue
 
         text = info["from_text"]
+        from_para_txt = info["from_para_text"]
+        to_para_txt = info["to_para_text"]
 
         moves.append(
             Move(
@@ -318,25 +321,18 @@ def _parse_moves_from_root(
                 to_para_idx=info["to_final_idx"],
                 from_context=MoveContext(
                     para_idx=info["from_xml_idx"],
-                    paragraph_text=text,
-                    sentences=_find_sentences_containing(text, 0, len(text)),
+                    paragraph_text=from_para_txt,
+                    sentences=_find_sentences_containing(from_para_txt, 0, len(text)),
                 ),
                 to_context=MoveContext(
                     para_idx=info["to_final_idx"],
-                    paragraph_text=text,
-                    sentences=_find_sentences_containing(text, 0, len(text)),
+                    paragraph_text=to_para_txt,
+                    sentences=_find_sentences_containing(to_para_txt, 0, len(text)),
                 ),
             )
         )
 
     return moves
-
-
-def _parse_moves(xml_bytes: bytes) -> list[Move]:
-    """Parse moves from raw document.xml bytes (thin wrapper for tests/CLI)."""
-    root = ET.fromstring(xml_bytes)
-    parent_map = _build_parent_map(root)
-    return _parse_moves_from_root(root, parent_map)
 
 
 # ---------------------------------------------------------------------------
@@ -393,21 +389,6 @@ def extract_moves(docx: DocxSource) -> tuple[list[Move], WordVersion]:
         return _parse_moves(document_bytes), version
     except ET.ParseError as e:
         raise DocxParseError(f"Document XML is malformed: {e}") from e
-
-
-# Re-exports for callers that already have a parsed document root.
-__all__ = [
-    "Redline",
-    "RedlineContext",
-    "Move",
-    "MoveContext",
-    "extract_redlines",
-    "extract_moves",
-    "_parse_redlines",
-    "_parse_moves",
-    "_parse_redlines_from_root",
-    "_parse_moves_from_root",
-]
 
 
 # ---------------------------------------------------------------------------

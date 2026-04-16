@@ -65,21 +65,6 @@ def _embed(texts: tuple[str, ...], model_name: str) -> np.ndarray:
     )
 
 
-def _rank_scoring_hits(
-    scores: np.ndarray, threshold: float
-) -> list[tuple[int, float]]:
-    """Return (index, score) pairs above threshold, sorted by score descending.
-
-    Filters to matches first, then sorts only those — O(n + k log k) instead of
-    O(n log n) when most documents score below threshold.
-    """
-    idx = np.where(scores >= threshold)[0]
-    if idx.size == 0:
-        return []
-    ordered = idx[np.argsort(-scores[idx])]
-    return [(int(i), float(scores[i])) for i in ordered]
-
-
 # ---------------------------------------------------------------------------
 # Page
 # ---------------------------------------------------------------------------
@@ -211,13 +196,11 @@ if not query or not query.strip():
 q = query.strip()
 
 # Build a key that uniquely identifies this search. Hits are cached in session
-# state so pagination never re-runs the search. The corpus identity is
-# captured by the sorted tuple of (name, byte length) per file — cheap to
-# compute and stable across reruns without re-hashing every paragraph.
+# state so pagination never re-runs the search.
 _score_key = round(min_score, 2) if method in ("Relevance", "Semantic") else 0.0
 _model_key = model_name if method == "Semantic" else ""
-_corpus_sig = tuple((name, len(data)) for name, data in files_to_use)
-search_key = (q, method, _score_key, _model_key, _corpus_sig)
+_corpus_hash = hash(tuple(texts))
+search_key = (q, method, _score_key, _model_key, _corpus_hash)
 
 if st.session_state.get(KEY_SEARCH_HITS_KEY) != search_key:
     # Parameters changed — run the search and cache results.
@@ -242,8 +225,10 @@ if st.session_state.get(KEY_SEARCH_HITS_KEY) != search_key:
                 st.stop()
         case "Relevance":
             scores = bm25_scores(texts, q)
-            hits = _rank_scoring_hits(scores, threshold=max(min_score, 1e-12))
-            if not hits and (scores > 0).any():
+            ranked = np.argsort(-scores)
+            all_positive = [(int(i), float(scores[i])) for i in ranked if scores[i] > 0]
+            hits = [(i, s) for i, s in all_positive if s >= min_score]
+            if not hits and all_positive:
                 st.info(
                     f"No results above the minimum score ({min_score:.2f}). Try lowering it in the sidebar."
                 )
@@ -260,8 +245,10 @@ if st.session_state.get(KEY_SEARCH_HITS_KEY) != search_key:
                 st.error(str(e))
                 st.stop()
             sims = corpus_embs @ q_emb
-            hits = _rank_scoring_hits(sims, threshold=min_score)
-            if not hits and (sims > 0).any():
+            ranked = np.argsort(-sims)
+            all_ranked = [(int(i), float(sims[i])) for i in ranked]
+            hits = [(i, s) for i, s in all_ranked if s >= min_score]
+            if not hits and any(s > 0 for _, s in all_ranked):
                 st.info(
                     f"No results above the minimum score ({min_score:.2f}). Try lowering it in the sidebar."
                 )

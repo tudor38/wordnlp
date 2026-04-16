@@ -183,37 +183,27 @@ def bm25_scores(
     tokenized_docs = [tokenize(doc) for doc in docs]
     doc_lens = np.array([len(tokens) for tokens in tokenized_docs], dtype=float)
     avgdl = float(doc_lens.mean()) if len(doc_lens) else 0.0
-    avgdl = max(avgdl, 1.0)
     n_docs = len(docs)
 
-    # Only query terms contribute to BM25 scoring, so confine doc_freq and tf
-    # to the query vocabulary. For typical short queries over large corpora
-    # this avoids O(total_tokens) dict work per document.
-    query_set = set(query_terms)
-    doc_freq: dict[str, int] = {term: 0 for term in query_set}
+    doc_freq: dict[str, int] = {}
     for tokens in tokenized_docs:
-        for term in query_set.intersection(tokens):
-            doc_freq[term] += 1
-
-    idf_by_term: dict[str, float] = {
-        term: math.log(1 + (n_docs - doc_freq[term] + 0.5) / (doc_freq[term] + 0.5))
-        for term in query_terms
-    }
+        for term in set(tokens):
+            doc_freq[term] = doc_freq.get(term, 0) + 1
 
     scores = np.zeros(n_docs, dtype=float)
     for idx, tokens in enumerate(tokenized_docs):
         tf: dict[str, int] = {}
-        for tok in tokens:
-            if tok in query_set:
-                tf[tok] = tf.get(tok, 0) + 1
-        if not tf:
-            continue
+        for term in tokens:
+            tf[term] = tf.get(term, 0) + 1
         dl = max(doc_lens[idx], 1.0)
-        length_norm = k1 * (1 - b + b * dl / avgdl)
-        for term, freq in tf.items():
-            denom = freq + length_norm
-            scores[idx] += idf_by_term[term] * (freq * (k1 + 1)) / max(denom, 1e-9)
-
+        for term in query_terms:
+            if term not in tf:
+                continue
+            df = doc_freq.get(term, 0)
+            idf = math.log(1 + (n_docs - df + 0.5) / (df + 0.5))
+            freq = tf[term]
+            denom = freq + k1 * (1 - b + b * dl / max(avgdl, 1.0))
+            scores[idx] += idf * (freq * (k1 + 1)) / max(denom, 1e-9)
     if scores.size:
         max_score = scores.max()
         if max_score > 0:

@@ -1,7 +1,5 @@
 import io
 import logging
-import xml.etree.ElementTree as ET
-import zipfile
 from dataclasses import dataclass
 from datetime import datetime, date
 
@@ -9,24 +7,8 @@ import pandas as pd
 
 logger = logging.getLogger(__name__)
 
-from src.comments.extract import (
-    Comment,
-    DocumentParagraphs,
-    _assemble_comments,
-    _extract_paragraphs_from_root,
-)
-from src.redlines.extract import (
-    Redline,
-    Move,
-    _parse_moves_from_root,
-    _parse_redlines_from_root,
-)
-from src.shared import (
-    DocxParseError,
-    WordVersion,
-    _build_parent_map,
-    detect_version,
-)
+from src.comments.extract import Comment, extract_comments, extract_paragraphs
+from src.redlines.extract import Redline, Move, extract_redlines, extract_moves
 
 
 # ---------------------------------------------------------------------------
@@ -42,8 +24,7 @@ class DocumentData:
     comments: list[Comment]
     redlines: list[Redline]
     moves: list[Move]
-    paragraphs: DocumentParagraphs
-    version: WordVersion
+    all_paragraphs: list[str]
 
 
 # ---------------------------------------------------------------------------
@@ -61,17 +42,13 @@ class CommentMetrics:
 
 def comment_metrics(comments: list[Comment]) -> CommentMetrics:
     top_level = len(comments)
-    replies = 0
-    resolved = 0
-    for c in comments:
-        if c.resolved:
-            resolved += 1
-        for r in c.replies:
-            replies += 1
-            if r.resolved:
-                resolved += 1
+    replies = sum(len(c.replies) for c in comments)
+    resolved = sum(1 for c in comments if c.resolved) + sum(
+        1 for c in comments for r in c.replies if r.resolved
+    )
+    total = top_level + replies
     return CommentMetrics(
-        total=top_level + replies,
+        total=total,
         top_level=top_level,
         replies=replies,
         resolved=resolved,
@@ -145,61 +122,13 @@ def _comment_context_fields(ctx) -> dict:
     }
 
 
-def load_document(file_bytes: bytes) -> DocumentData:
-    """
-    Load all raw extracted data from a .docx file in a single pass.
-
-    Opens the zip archive once and parses word/document.xml once. The shared
-    XML root and parent map are reused across comment context, redline,
-    move, and paragraph extraction, avoiding four redundant parses.
-    """
-    try:
-        with zipfile.ZipFile(io.BytesIO(file_bytes)) as zf:
-            names = zf.namelist()
-            version = detect_version(names)
-
-            def _read(name: str) -> bytes:
-                return zf.read(name) if name in names else b""
-
-            document_bytes = _read("word/document.xml")
-            comments_bytes = _read("word/comments.xml")
-            extended_bytes = _read("word/commentsExtended.xml")
-            ids_bytes = _read("word/commentsIds.xml")
-    except zipfile.BadZipFile as e:
-        raise DocxParseError("Not a valid Word document (.docx).") from e
-
-    try:
-        if document_bytes:
-            document_root = ET.fromstring(document_bytes)
-            parent_map = _build_parent_map(document_root)
-            paragraphs = _extract_paragraphs_from_root(document_root, parent_map)
-            redlines = _parse_redlines_from_root(document_root, parent_map)
-            moves = _parse_moves_from_root(document_root, parent_map)
-        else:
-            document_root = None
-            parent_map = None
-            paragraphs = DocumentParagraphs(paragraphs=[], moved_from={})
-            redlines = []
-            moves = []
-
-        comments = _assemble_comments(
-            comments_bytes,
-            extended_bytes,
-            ids_bytes,
-            version,
-            document_root,
-            parent_map,
-        )
-    except ET.ParseError as e:
-        raise DocxParseError(f"Document XML is malformed: {e}") from e
-
-    return DocumentData(
-        comments=comments,
-        redlines=redlines,
-        moves=moves,
-        paragraphs=paragraphs,
-        version=version,
-    )
+def load_document(file_bytes: bytes) -> tuple:
+    """Load parsed Word document objects from bytes."""
+    comments, version = extract_comments(io.BytesIO(file_bytes))
+    redlines, _ = extract_redlines(io.BytesIO(file_bytes))
+    moves, _ = extract_moves(io.BytesIO(file_bytes))
+    paragraphs = extract_paragraphs(io.BytesIO(file_bytes))
+    return (comments, version, redlines, moves, paragraphs)
 
 
 def build_stats_dfs(
@@ -217,7 +146,7 @@ def build_stats_dfs(
     return c_df, r_df, m_df, all_authors
 
 
-def _build_ages_df(
+def _build_age_grouper(
     items: list[tuple[object, str]],
     row_builder,
     reference_date: datetime | None = None,
@@ -245,7 +174,7 @@ def comment_ages_df(
         (reply, "reply") for c in comments for reply in c.replies
     ]
 
-    return _build_ages_df(
+    return _build_age_grouper(
         all_items,
         lambda c, kind, dt: {
             "author": c.author,
@@ -271,7 +200,7 @@ def redline_ages_df(
     redlines: list[Redline],
     reference_date: datetime | None = None,
 ) -> pd.DataFrame:
-    return _build_ages_df(
+    return _build_age_grouper(
         [(r, "redline") for r in redlines],
         lambda r, kind, dt: {
             "author": r.author,
@@ -287,7 +216,7 @@ def move_ages_df(
     moves: list[Move],
     reference_date: datetime | None = None,
 ) -> pd.DataFrame:
-    return _build_ages_df(
+    return _build_age_grouper(
         [(m, "move") for m in moves],
         lambda m, kind, dt: {
             "author": m.author,
