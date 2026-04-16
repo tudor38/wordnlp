@@ -25,6 +25,13 @@ def _tag(ns: str, local: str) -> str:
     return f"{{{ns}}}{local}"
 
 
+# Pre-computed tags used in hot-path ancestor walks — avoid recomputing per element.
+MOVE_FROM_TAG = _tag(W, "moveFrom")
+MOVE_TO_TAG = _tag(W, "moveTo")
+P_TAG = _tag(W, "p")
+T_TAG = _tag(W, "t")
+
+
 # ---------------------------------------------------------------------------
 # Span types
 # ---------------------------------------------------------------------------
@@ -107,13 +114,11 @@ def _build_parent_map(root: ET.Element) -> dict[ET.Element, ET.Element]:
 
 def _in_move_from(elem: ET.Element, parent_map: dict[ET.Element, ET.Element]) -> bool:
     """Return True if elem is a descendant of a <w:moveFrom> element."""
-    move_from = _tag(W, "moveFrom")
-    move_to = _tag(W, "moveTo")
     current = elem
     while current in parent_map:
         current = parent_map[current]
-        if current.tag == move_from:
+        if current.tag == MOVE_FROM_TAG:
             return True
-        if current.tag == move_to:
+        if current.tag == MOVE_TO_TAG:
             return False
     return False

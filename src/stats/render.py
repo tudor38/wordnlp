@@ -61,7 +61,7 @@ class TimelineField(NamedTuple):
     """Maps a display label to a DataFrame column and an optional highlight column."""
 
     label: str
-    col: str
+    column: str
     highlight: str | None = None  # column to use for paragraph highlight
 
 
@@ -181,14 +181,14 @@ def _detect_pairs(display: pd.DataFrame) -> tuple[dict[int, int], set[int]]:
         elif r["Kind"] == "deletion":
             del_by_key[key].append(idx)
     pair_partner: dict[int, int] = {}
-    pair_skip: set[int] = set()
+    paired_followers: set[int] = set()
     for key in ins_by_key:
         if key in del_by_key:
             for ins_i, del_i in zip(ins_by_key[key], del_by_key[key]):
                 leader, follower = min(ins_i, del_i), max(ins_i, del_i)
                 pair_partner[leader] = follower
-                pair_skip.add(follower)
-    return pair_partner, pair_skip
+                paired_followers.add(follower)
+    return pair_partner, paired_followers
 
 
 def _render_fields(
@@ -200,12 +200,12 @@ def _render_fields(
     """Render field values for a single row in expanded view."""
     for label in labels:
         tf = field_map.get(label)
-        if tf is None or tf.col not in columns:
+        if tf is None or tf.column not in columns:
             continue
-        val = row[tf.col]
+        val = row[tf.column]
         if not val and val != 0:
             continue
-        if tf.col == "Resolved":
+        if tf.column == "Resolved":
             st.markdown(f"**Marked Resolved:** {'Yes' if val else 'No'}")
         elif tf.highlight and tf.highlight in columns:
             hl_val = row[tf.highlight]
@@ -231,19 +231,19 @@ def _render_pair_fields(
     """Render field values for an insertion+deletion pair in expanded view."""
     for label in labels:
         tf = field_map.get(label)
-        if tf is None or tf.col not in columns:
+        if tf is None or tf.column not in columns:
             continue
         if tf.highlight and tf.highlight in columns:
             st.markdown(f"**{label}:**")
-            items = del_row[tf.col]
+            items = del_row[tf.column]
             items = items if isinstance(items, list) else [items]
             for item in items:
                 render_paragraph_with_redline_pair(
                     item, del_row[tf.highlight] or "", ins_row[tf.highlight] or ""
                 )
         else:
-            del_val = del_row[tf.col]
-            ins_val = ins_row[tf.col]
+            del_val = del_row[tf.column]
+            ins_val = ins_row[tf.column]
             if not del_val and not ins_val:
                 continue
             del_span = f'<span style="color:#ef4444;text-decoration:line-through">{html.escape(str(del_val))}</span>'
@@ -258,9 +258,9 @@ def _render_as_expanded(
     expand_all: bool,
 ) -> None:
     columns = frozenset(display.columns)
-    pair_partner, pair_skip = _detect_pairs(display)
+    pair_partner, paired_followers = _detect_pairs(display)
     for idx, row in display.iterrows():
-        if idx in pair_skip:
+        if idx in paired_followers:
             continue
         if idx in pair_partner:
             partner_row = display.loc[pair_partner[idx]]
@@ -289,8 +289,8 @@ def _render_as_table(
         keep_cols.append("Kind")
     for label in show_fields:
         tf = field_map.get(label)
-        if tf and tf.col.capitalize() in display.columns:
-            keep_cols.append(tf.col.capitalize())
+        if tf and tf.column.capitalize() in display.columns:
+            keep_cols.append(tf.column.capitalize())
     st.dataframe(
         display[[c for c in keep_cols if c in display.columns]],
         hide_index=True,

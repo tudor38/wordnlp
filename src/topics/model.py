@@ -70,7 +70,7 @@ def default_granularity(n_docs: int) -> tuple[int, int, int]:
 
 
 def topic_color_map(label_layer: np.ndarray) -> dict[str, str]:
-    unique = [l for l in dict.fromkeys(label_layer) if l != "Noise"]
+    unique = [label for label in dict.fromkeys(label_layer) if label != "Noise"]
     return {
         label: TOPIC_PALETTE[i % len(TOPIC_PALETTE)] for i, label in enumerate(unique)
     }

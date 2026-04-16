@@ -52,8 +52,8 @@ def sidebar_controls(
     )
 
     if is_closed:
-        ld = latest_date(comments, redlines)
-        default = ld.date() if ld else datetime.today().date()
+        latest = latest_date(comments, redlines)
+        default = latest.date() if latest else datetime.today().date()
         if (
             KEY_DOC_FINALIZED_DATE not in st.session_state
             or st.session_state[KEY_DOC_FINALIZED_DATE] is None
