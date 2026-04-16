@@ -1,4 +1,3 @@
-
 from src.comments.extract import Comment
 from src.stats.compute import comment_metrics, comment_metrics_from_df, latest_date
 

@@ -160,9 +160,15 @@ def _parse(raw: dict) -> AppConfig:
         tabs_raw = _section(raw, "pages", "document_statistics", "tabs")
         document_statistics_tabs = DocumentStatisticsTabs(
             main=_field(tabs_raw, "main", "pages.document_statistics.tabs", list),
-            comment_views=_field(tabs_raw, "comment_views", "pages.document_statistics.tabs", list),
-            redline_views=_field(tabs_raw, "redline_views", "pages.document_statistics.tabs", list),
-            move_views=_field(tabs_raw, "move_views", "pages.document_statistics.tabs", list),
+            comment_views=_field(
+                tabs_raw, "comment_views", "pages.document_statistics.tabs", list
+            ),
+            redline_views=_field(
+                tabs_raw, "redline_views", "pages.document_statistics.tabs", list
+            ),
+            move_views=_field(
+                tabs_raw, "move_views", "pages.document_statistics.tabs", list
+            ),
         )
 
         return AppConfig(

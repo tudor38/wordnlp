@@ -86,7 +86,9 @@ def sidebar_controls(
 
     global_date_min = min(df["date"].min().date() for df in non_empty)
     data_date_max = max(df["date"].max().date() for df in non_empty)
-    global_date_max = data_date_max if is_closed else min(data_date_max, datetime.now().date())
+    global_date_max = (
+        data_date_max if is_closed else min(data_date_max, datetime.now().date())
+    )
 
     saved_min = max(
         st.session_state[KEY_FILTER_DATE_MIN] or global_date_min, global_date_min
@@ -110,12 +112,15 @@ def sidebar_controls(
         st.session_state["_filter_authors"] = (
             st.session_state[KEY_FILTER_AUTHORS] or all_authors
         )
-        selected_authors = st.sidebar.multiselect(
-            "Comment authors",
-            options=all_authors,
-            key="_filter_authors",
-            on_change=store_timeline_authors,
-        ) or all_authors
+        selected_authors = (
+            st.sidebar.multiselect(
+                "Comment authors",
+                options=all_authors,
+                key="_filter_authors",
+                on_change=store_timeline_authors,
+            )
+            or all_authors
+        )
     else:
         selected_authors = []
 

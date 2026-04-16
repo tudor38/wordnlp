@@ -1,4 +1,3 @@
-
 from src.shared import Span, WordVersion, detect_version
 
 
