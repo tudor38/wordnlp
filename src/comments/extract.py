@@ -44,6 +44,8 @@ from src.shared import (
     W14,
     W15,
     _tag,
+    P_TAG,
+    T_TAG,
     Span,
     SentenceSpan,
     WordVersion,
@@ -53,6 +55,12 @@ from src.shared import (
     _build_parent_map,
     _in_move_from,
 )
+
+_COMMENT_RANGE_START_TAG = _tag(W, "commentRangeStart")
+_COMMENT_RANGE_END_TAG = _tag(W, "commentRangeEnd")
+_COMMENT_REF_TAG = _tag(W, "commentReference")
+_PARA_ID_ATTR = _tag(W14, "paraId")
+_ID_ATTR = _tag(W, "id")
 
 
 # ---------------------------------------------------------------------------
@@ -154,19 +162,22 @@ def _parse_comments_ids(xml_bytes: bytes) -> dict[str, str]:
     return para_to_owner
 
 
-def _build_para_to_comment_from_document(xml_bytes: bytes) -> dict[str, str]:
-    root = ET.fromstring(xml_bytes)
+def _build_para_to_comment_from_root(root: ET.Element) -> dict[str, str]:
     para_to_comment: dict[str, str] = {}
-    for para in root.iter(_tag(W, "p")):
-        para_id = para.get(_tag(W14, "paraId"))
+    for para in root.iter(P_TAG):
+        para_id = para.get(_PARA_ID_ATTR)
         if para_id is None:
             continue
-        ref = para.find(".//" + _tag(W, "commentReference"))
+        ref = para.find(".//" + _COMMENT_REF_TAG)
         if ref is not None:
-            cid = ref.get(_tag(W, "id"))
+            cid = ref.get(_ID_ATTR)
             if cid:
                 para_to_comment[para_id] = cid
     return para_to_comment
+
+
+def _build_para_to_comment_from_document(xml_bytes: bytes) -> dict[str, str]:
+    return _build_para_to_comment_from_root(ET.fromstring(xml_bytes))
 
 
 def _apply_extended(
@@ -212,19 +223,18 @@ def _apply_extended(
 # ---------------------------------------------------------------------------
 # Document context — selected text, paragraph, and sentences
 # ---------------------------------------------------------------------------
-def _parse_document_context(xml_bytes: bytes) -> dict[str, CommentContext]:
+def _parse_document_context_from_root(
+    root: ET.Element, parent_map: dict[ET.Element, ET.Element]
+) -> dict[str, CommentContext]:
     """
-    Parse word/document.xml and extract a CommentContext for each comment id.
+    Extract a CommentContext for each comment id from a parsed document root.
 
     Only non-moveFrom paragraphs are enumerated so that para_idx values
     align with DocumentParagraphs.paragraphs indices.
     """
-    root = ET.fromstring(xml_bytes)
-    parent_map = _build_parent_map(root)
-
     # Only paragraphs that appear in the final document
     para_elements: list[ET.Element] = [
-        p for p in root.iter(_tag(W, "p")) if not _in_move_from(p, parent_map)
+        p for p in root.iter(P_TAG) if not _in_move_from(p, parent_map)
     ]
 
     open_ranges: dict[str, dict] = {}
@@ -235,41 +245,48 @@ def _parse_document_context(xml_bytes: bytes) -> dict[str, CommentContext]:
         char_pos = 0
         para_text_parts: list[str] = []
 
-        for acc in open_ranges.values():
-            acc["sel_chunks"].append("\n")
+        for open_range in open_ranges.values():
+            open_range["chunks"].append("\n")
 
         for elem in para.iter():
             tag = elem.tag
 
-            if tag == _tag(W, "commentRangeStart"):
-                cid = elem.get(_tag(W, "id"))
+            if tag == _COMMENT_RANGE_START_TAG:
+                cid = elem.get(_ID_ATTR)
                 if cid:
                     open_ranges[cid] = {
                         "start_para": para_idx,
                         "start_char": char_pos,
-                        "sel_chunks": [],
+                        "chunks": [],
                     }
 
-            elif tag == _tag(W, "commentRangeEnd"):
-                cid = elem.get(_tag(W, "id"))
+            elif tag == _COMMENT_RANGE_END_TAG:
+                cid = elem.get(_ID_ATTR)
                 if cid and cid in open_ranges:
-                    acc = open_ranges.pop(cid)
+                    open_range = open_ranges.pop(cid)
                     completed[cid] = {
-                        "selected": "".join(acc["sel_chunks"]),
-                        "start_para": acc["start_para"],
-                        "start_char": acc["start_char"],
+                        "selected": "".join(open_range["chunks"]),
+                        "start_para": open_range["start_para"],
+                        "start_char": open_range["start_char"],
                         "end_para": para_idx,
                         "end_char": char_pos,
                     }
 
-            elif tag == _tag(W, "t"):
+            elif tag == T_TAG:
                 text = elem.text or ""
                 char_pos += len(text)
                 para_text_parts.append(text)
-                for acc in open_ranges.values():
-                    acc["sel_chunks"].append(text)
+                for open_range in open_ranges.values():
+                    open_range["chunks"].append(text)
 
         para_texts.append("".join(para_text_parts))
+
+    # Precompute cumulative offsets so multi-paragraph span calculation is O(1) per comment
+    # instead of O(end_para - start_para). Entry i is the char offset of para i in a
+    # joined-by-"\n" string starting at para 0.
+    cumulative_offsets: list[int] = [0]
+    for text in para_texts:
+        cumulative_offsets.append(cumulative_offsets[-1] + len(text) + 1)
 
     contexts: dict[str, CommentContext] = {}
 
@@ -284,8 +301,7 @@ def _parse_document_context(xml_bytes: bytes) -> dict[str, CommentContext]:
         else:
             para_text = "\n".join(para_texts[sp : ep + 1])
             sel_start = info["start_char"]
-            offset_to_ep = sum(len(para_texts[i]) + 1 for i in range(sp, ep))
-            sel_end = offset_to_ep + info["end_char"]
+            sel_end = (cumulative_offsets[ep] - cumulative_offsets[sp]) + info["end_char"]
 
         contexts[cid] = CommentContext(
             start_para_idx=sp,
@@ -297,6 +313,13 @@ def _parse_document_context(xml_bytes: bytes) -> dict[str, CommentContext]:
         )
 
     return contexts
+
+
+def _parse_document_context(xml_bytes: bytes) -> dict[str, CommentContext]:
+    """Parse comment contexts from document.xml bytes (wrapper for tests/CLI)."""
+    root = ET.fromstring(xml_bytes)
+    parent_map = _build_parent_map(root)
+    return _parse_document_context_from_root(root, parent_map)
 
 
 # ---------------------------------------------------------------------------
@@ -317,6 +340,41 @@ def _build_tree(comments: dict[str, Comment]) -> list[Comment]:
 # Public API
 # ---------------------------------------------------------------------------
 type DocxSource = str | Path | io.IOBase
+
+
+def _assemble_comments(
+    comments_bytes: bytes,
+    extended_bytes: bytes,
+    ids_bytes: bytes,
+    version: WordVersion,
+    document_root: ET.Element | None,
+    parent_map: dict[ET.Element, ET.Element] | None,
+) -> list[Comment]:
+    """Build the Comment tree from already-loaded XML parts and a parsed document root."""
+    if not comments_bytes:
+        return []
+
+    comments, para_to_comment = _parse_comments(comments_bytes)
+
+    if version == WordVersion.MODERN:
+        para_to_owner = _parse_comments_ids(ids_bytes)
+        for para_id, owner_para_id in para_to_owner.items():
+            if para_id not in para_to_comment and owner_para_id in para_to_comment:
+                para_to_comment[para_id] = para_to_comment[owner_para_id]
+        _apply_extended(comments, para_to_comment, extended_bytes)
+
+    elif version == WordVersion.EXTENDED:
+        if document_root is not None:
+            para_to_comment.update(_build_para_to_comment_from_root(document_root))
+        _apply_extended(comments, para_to_comment, extended_bytes)
+
+    if document_root is not None and parent_map is not None:
+        contexts = _parse_document_context_from_root(document_root, parent_map)
+        for cid, ctx in contexts.items():
+            if cid in comments:
+                comments[cid].context = ctx
+
+    return _build_tree(comments)
 
 
 def extract_comments(docx: DocxSource) -> tuple[list[Comment], WordVersion]:
@@ -353,31 +411,39 @@ def extract_comments(docx: DocxSource) -> tuple[list[Comment], WordVersion]:
         return [], version
 
     try:
-        comments, para_to_comment = _parse_comments(comments_bytes)
-
-        if version == WordVersion.MODERN:
-            para_to_owner = _parse_comments_ids(ids_bytes)
-            for para_id, owner_para_id in para_to_owner.items():
-                if para_id not in para_to_comment and owner_para_id in para_to_comment:
-                    para_to_comment[para_id] = para_to_comment[owner_para_id]
-            _apply_extended(comments, para_to_comment, extended_bytes)
-
-        elif version == WordVersion.EXTENDED:
-            if document_bytes:
-                para_to_comment.update(
-                    _build_para_to_comment_from_document(document_bytes)
-                )
-            _apply_extended(comments, para_to_comment, extended_bytes)
-
         if document_bytes:
-            contexts = _parse_document_context(document_bytes)
-            for cid, ctx in contexts.items():
-                if cid in comments:
-                    comments[cid].context = ctx
+            document_root = ET.fromstring(document_bytes)
+            parent_map = _build_parent_map(document_root)
+        else:
+            document_root = None
+            parent_map = None
+
+        top_level = _assemble_comments(
+            comments_bytes,
+            extended_bytes,
+            ids_bytes,
+            version,
+            document_root,
+            parent_map,
+        )
     except ET.ParseError as e:
         raise DocxParseError(f"Document XML is malformed: {e}") from e
 
-    return _build_tree(comments), version
+    return top_level, version
+
+
+def _extract_paragraphs_from_root(
+    root: ET.Element, parent_map: dict[ET.Element, ET.Element]
+) -> DocumentParagraphs:
+    paragraphs: list[str] = []
+    moved_from: dict[int, str] = {}
+    for xml_idx, para in enumerate(root.iter(P_TAG)):
+        text = "".join(t.text or "" for t in para.iter(T_TAG))
+        if _in_move_from(para, parent_map):
+            moved_from[xml_idx] = text
+        else:
+            paragraphs.append(text)
+    return DocumentParagraphs(paragraphs=paragraphs, moved_from=moved_from)
 
 
 def extract_paragraphs(docx: DocxSource) -> DocumentParagraphs:
@@ -404,19 +470,7 @@ def extract_paragraphs(docx: DocxSource) -> DocumentParagraphs:
     except ET.ParseError as e:
         raise DocxParseError(f"Document XML is malformed: {e}") from e
 
-    parent_map = _build_parent_map(root)
-
-    paragraphs: list[str] = []
-    moved_from: dict[int, str] = {}
-
-    for xml_idx, para in enumerate(root.iter(_tag(W, "p"))):
-        text = "".join(t.text or "" for t in para.iter(_tag(W, "t")))
-        if _in_move_from(para, parent_map):
-            moved_from[xml_idx] = text
-        else:
-            paragraphs.append(text)
-
-    return DocumentParagraphs(paragraphs=paragraphs, moved_from=moved_from)
+    return _extract_paragraphs_from_root(root, _build_parent_map(root))
 
 
 # ---------------------------------------------------------------------------

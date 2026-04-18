@@ -7,7 +7,6 @@ import pandas as pd
 from src.shared import DocxParseError
 from src.stats.compute import (
     build_stats_dfs,
-    comment_metrics,
     comment_metrics_from_df,
     filter_by_date,
     load_document,
@@ -443,14 +442,21 @@ if get_file_name() == _DEFAULT_DOC_NAME and not st.session_state.get(
 
 if file_bytes:
     try:
-        comments, version, redlines, moves, doc_paragraphs = load_document(file_bytes)
+        doc_data = load_document(file_bytes)
     except DocxParseError as e:
         st.error(f"Could not read the uploaded file: {e}")
         st.stop()
 
-    c_df, r_df, m_df, _all_authors = build_stats_dfs(
-        comments, redlines, moves, datetime.now()
-    )
+    comments = doc_data.comments
+    redlines = doc_data.redlines
+    moves = doc_data.moves
+
+    # Build age DataFrames once. The sidebar needs them for its date slider and
+    # author list, which only depend on `date` and `author` — columns that don't
+    # change with the reference date. When the user marks the matter closed, we
+    # recompute just `age_days` in place instead of rebuilding the whole frames.
+    initial_reference = datetime.now()
+    c_df, r_df, m_df, _ = build_stats_dfs(comments, redlines, moves, initial_reference)
 
     reference_date, is_closed, date_range, selected_authors = sidebar_controls(
         comments,
@@ -462,10 +468,10 @@ if file_bytes:
         store_timeline_authors=_store_timeline_authors,
     )
 
-    if is_closed:
-        c_df, r_df, m_df, _all_authors = build_stats_dfs(
-            comments, redlines, moves, reference_date
-        )
+    if is_closed and reference_date != initial_reference:
+        for df in (c_df, r_df, m_df):
+            if not df.empty:
+                df["age_days"] = (reference_date - df["date"]).dt.days
 
     all_authors = sorted(c_df["author"].unique().tolist()) if not c_df.empty else []
 

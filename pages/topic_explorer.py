@@ -57,6 +57,37 @@ from src.topics.render import render_interactive_map, show_map
 
 file_bytes = require_document()
 
+
+@st.cache_data(show_spinner=False, max_entries=3)
+def _file_fingerprint(file_bytes: bytes) -> str:
+    """MD5 of the uploaded file, cached to avoid rehashing 25 MB on every rerun."""
+    return hashlib.md5(file_bytes).hexdigest()
+
+
+def _top_k_indices(
+    scores: np.ndarray,
+    k: int,
+    threshold: float,
+    *,
+    strict: bool = True,
+) -> list[int]:
+    """Return indices of the top-k scores meeting the threshold, sorted high→low.
+
+    Uses argpartition (O(n)) to find the top-k candidates then argsort (O(k log k))
+    over just those, instead of a full O(n log n) argsort over every document.
+    """
+    if scores.size == 0 or k <= 0:
+        return []
+    k = min(k, scores.size)
+    # argpartition puts the k largest scores in the last k positions (unordered).
+    partition_idx = np.argpartition(-scores, k - 1)[:k]
+    # Sort just those k, descending.
+    ordered = partition_idx[np.argsort(-scores[partition_idx])]
+    if strict:
+        return [int(i) for i in ordered if scores[i] > threshold]
+    return [int(i) for i in ordered if scores[i] >= threshold]
+
+
 doc_paragraphs = extract_paragraphs(io.BytesIO(file_bytes))
 
 _model_options = [MODEL_MPNET, MODEL_MINILM]
@@ -262,7 +293,7 @@ if seed_words_raw and seed_words_raw.strip():
 _topic_state_key = hashlib.md5(
     repr(
         {
-            "doc": hashlib.md5(file_bytes).hexdigest(),
+            "doc": _file_fingerprint(file_bytes),
             "unit": analysis_unit,
             "min_chars": min_chars,
             "model": embedding_model_name,
@@ -352,9 +383,8 @@ else:
                 matched_indices = []
         case "Relevance":
             scores = bm25_scores(docs, normalized_query)
-            ranked = np.argsort(-scores)
-            matched_indices = [int(i) for i in ranked if scores[i] > 0][:rank_limit]
-            score_map = {int(i): float(scores[i]) for i in matched_indices}
+            matched_indices = _top_k_indices(scores, rank_limit, threshold=0.0)
+            score_map = {i: float(scores[i]) for i in matched_indices}
         case _:  # Semantic
             encoder = get_sentence_transformer(embedding_model_name)
             query_embedding = encoder.encode(
@@ -365,11 +395,10 @@ else:
             cosine_scores = (embeddings @ query_embedding) / np.clip(
                 doc_norms * query_norm, 1e-9, None
             )
-            ranked = np.argsort(-cosine_scores)
-            matched_indices = [
-                int(i) for i in ranked if cosine_scores[i] >= semantic_min_score
-            ][:rank_limit]
-            score_map = {int(i): float(cosine_scores[i]) for i in matched_indices}
+            matched_indices = _top_k_indices(
+                cosine_scores, rank_limit, threshold=semantic_min_score, strict=False
+            )
+            score_map = {i: float(cosine_scores[i]) for i in matched_indices}
 
 
 st.subheader("Topic Explorer")
